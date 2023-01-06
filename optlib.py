@@ -36,7 +36,7 @@ class optlib:
     Function CalcMOSParams
     Calculates process params based on inputs
     """
-    def CalcMOSParams(self,Id,ICPrime,Ldrawn,WdrawnEachTrimmed=0,M=1,Vsb=0,fflicker=1,T_C=27):
+    def CalcMOSParams(self,Id,ICPrime,Ldrawn,WdrawnEachTrimmed=0,M=1,Vsb=0,fflicker=1,T_C=27,Vds=0):
         self.LoadProcessParams(None)
 
         if np.round(M) != M:
@@ -61,6 +61,15 @@ class optlib:
         elif (T_C < -200) or (T_C > 200):
             self.errorHandler("Temperature must be between -200 and 200C")
         
+        # Load user inputs
+        self.Id = Id
+        self.ICPrime = ICPrime
+        self.Ldrawn = Ldrawn
+        self.M = M
+        self.Vsb = Vsb
+        self.fflicker = fflicker
+        self.T_C = T_C
+
         # Set additional global values
         self.T = self.T_C + 273             # Temperature in K
         self.Ut= self.k *self.T / self.q    # Thermal voltage
@@ -85,8 +94,8 @@ class optlib:
         self.WL = self.L * self.W
 
         # Widths for each finger
-        self.Ldrawneach = (self.W/M)+self.DW
-        if self.Ldrawneach < self.Ldrawmin:
+        self.Wdrawneach = (self.W/M)+self.DW
+        if self.Wdrawneach < self.Wdrawmin:
             print("WARNING: drawn width is below limit.")
         
         # Vt adjusted for Vsb from Vto
@@ -110,8 +119,75 @@ class optlib:
 
         # Vdsat from IC
         self.Vdsat = 2 * self.Ut * (np.sqrt(self.IC+0.25)+0.5+1)
-        ## --------------------- LEFT OFF HERE -----------------------------##
         
+        # Set Vds = Vgs unless given by user
+        if Vds == 0:
+            self.Vds = self.Vgs
+        elif Vds < 0:
+            self.errorHandler("VDS must be positive and greater than zero.")
+        else:
+            self.Vds = Vds
+        
+        # Calculate drain body voltage
+        self.Vdb = self.Vds + self.Vsb
+        if self.Vdb > self.Vddmax:
+            self.errorHandler("Drain Body voltage exceeds process maximum.")
+        
+        # Test for saturation
+        if self.Vds < self.Vdsat:
+            self.errorHandler("VDS < VDSAT. Decrease IC or increase VDS")
+        
+        # Find gm/Id and gm
+        self.LEcritEquiv = 1/(self.theta + 1/(self.L*self.Ecrit))
+        self.ICcrit = (self.LEcritEquiv / (4*self.n *self.Ut))**2    # Transition point between gm/Id square / linear law
+
+        self.gm_Id = 1/(self.n*self.Ut*np.sqrt(self.IC + (1+self.IC/self.ICcrit)+0.5*np.sqrt(self.IC*(1 + self.IC/self.ICcrit))+1))
+        self.gm = self.gm_Id * self.Id
+
+        # Early voltage
+        self.VACLM = self.VAL * self.L
+        self.DVt_DVds = self.dVtDIBL * ((self.Ldrawmin-self.DL)/self.L)**self.dVtDIBLex
+
+        if self.DVt_DVds >=0:
+            self.VADIBL = 1e50
+        else:
+            self.VADIBL = 1/ (self.gm_Id *(-1*self.DVt_DVds))
+
+        self.VA = self.VACLM*self.VADIBL/(self.VACLM+self.VADIBL)
+        self.gds = self.Id/self.VA   # gds in uS
+
+        # Intrinsic voltage gain
+        self.Avi = self.gm / self.gds
+
+        # 1-dB input compression for diff pair
+        gmVindif1dB = self.gmFromVeff(self.Veff,self.Vsb,self.W,self.L)
+        self.Vindif1dB = self.FindVindif1dB(self.Id,self.Veff,gmVindif1dB,self.Vsb,self.W,self.L)
+
+        # Gate oxide capacitance (fF)
+        self.Cgox = self.WL * self.Cox
+
+        # Intrinsic gate capacitance
+        x = ((np.sqrt(self.IC+0.25)+0.5)+1)/(np.sqrt(self.IC+0.25)+0.5)**2
+        self.Cgsi = ((2/3)*(1-x/2))*self.Cgox
+        self.Cgbi = ((1/3)*((self.n-1)/self.n)*(1+x))*self.Cgox
+        
+        # Intrinsic bandwidth
+        self.fTi = 1000 * self.gm / (2*np.pi*(self.Cgsi+self.Cgbi))   # in MHz
+
+        # Extrinsic gate overlap capacitances
+        self.Cgso = self.Cgso_process * self.M * self.Wdrawneach
+        self.Cgbo = self.Cgbo_process * self.Ldrawn
+        self.Cgdo = self.Cgdo_process * self.M * self.Wdrawneach
+        self.Cgs = self.Cgsi + self.Cgso
+        self.Cgb = self.Cgbi + self.Cgbo
+        self.Cgd = self.Cgdo
+
+        # Operating bandwidth
+        self.fT = 1000 * self.gm / (2*np.pi*(self.Cgs + self.Cgb))  # in MHz
+
+        #----------------------_TODO: NOISE----------------------------------#
+
+
     
     """
     Function LoadProcessParams
@@ -136,7 +212,7 @@ class optlib:
             self.VAL = 6            # Early voltage for channel length modulation (note: should vary with L)
             self.dVtDIBL = -0.008   # Drain induced barrier lowering with Vds at min L
             self.dVtDIBLex = 3      # Exponent in DIBL eqn
-            self.kf0 = 3.18e-13     # Flicker noise factor in weak inversion
+            self.kf0 = 3.18e-31     # Flicker noise factor in weak inversion
             self.vkf = 1            # Voltage describing flicker noise increase
             self.af = 0.85          # Flicker noise slope
             self.aVto = 0.005       # V*um, Local area threshold voltage mismatch factor
