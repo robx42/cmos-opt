@@ -26,10 +26,11 @@ class optlib:
     """
     Optlib initialization
     """
-    def __init__(self):
+    def __init__(self,gm_mode=2):
         # Call import scripts here for model parameters
         self.k = 1.3806e-23   # Boltzmann's constant, J/K
         self.q = 1.603e-19    # Electron charge, C
+        self.gm_mode = gm_mode
         None
 
     """
@@ -141,8 +142,17 @@ class optlib:
         self.LEcritEquiv = 1/(self.theta + 1/(self.L*self.Ecrit))
         self.ICcrit = (self.LEcritEquiv / (4*self.n *self.Ut))**2    # Transition point between gm/Id square / linear law
 
-        self.gm_Id = 1/(self.n*self.Ut*np.sqrt(self.IC + (1+self.IC/self.ICcrit)+0.5*np.sqrt(self.IC*(1 + self.IC/self.ICcrit))+1))
-        self.gm = self.gm_Id * self.Id
+        if self.gm_mode == 2:
+            self.gm_Id = 1/(self.n*self.Ut*np.sqrt(self.IC + (1+self.IC/self.ICcrit)+0.5*np.sqrt(self.IC*(1 + self.IC/self.ICcrit))+1))
+            self.gm = self.gm_Id * self.Id
+        elif self.gm_mode ==1:
+            self.gm_Id = 1 / (self.n*self.Ut * (np.sqrt(self.IC*(1+self.IC/self.ICcrit)+0.25)+0.5))
+            self.gm = self.gm_Id * self.Id
+        else:
+            # Obtain by numerical derivative
+            self.gm = self.gmFromVeff(self.Veff,self.Vsb,self.W,self.L)
+            self.gm_Id = self.gm/self.Id
+
 
         # Early voltage
         self.VACLM = self.VAL * self.L
@@ -185,9 +195,34 @@ class optlib:
         # Operating bandwidth
         self.fT = 1000 * self.gm / (2*np.pi*(self.Cgs + self.Cgb))  # in MHz
 
-        #----------------------_TODO: NOISE----------------------------------#
 
+        # Noise and mismatch estimates
+        # Thermal noise (small geometry effects NOT included)
+        ThermalNoiseFactor = (1/(1+self.IC)) * (0.5 + 0.6667*self.IC)
+        nThermalNoiseFactor = self.n * ThermalNoiseFactor
 
+        self.SVgRootThermal = (10**9) * np.sqrt(4 *self.k *self.T *nThermalNoiseFactor /(self.gm*1e-6))    # Input referred voltage Noise in nV/rt-Hz 
+        self.SIdRootThermal = (10**12)* np.swrt(4*self.k*self.T*nThermalNoiseFactor*self.gm*1e-6)          # Current noise in pA/rt-Hz
+
+        # Flicker noise estimate using carrier density, correlated mobility fluctuation model
+        # Gate-referred flicker noise voltage PSD increases with VEFF, IC
+        if self.Veff > 0:
+            kf = self.kf0 * (1 + self.Veff/self.vkf)**2
+        else:
+            kf = self.kf0
+
+        kfprimeroot = np.sqrt((kf/1e-40)/self.Cox**2)
+        # nV*um                 C^2/cm^2    fF/um^2
+
+        # Find gate-referred flicker noise voltage and drain-referred flicker noise current at f=fflicker
+        self.SVgRootFlicker = kfprimeroot * np.sqrt(1/(self.WL*self.fflicker**self.af))    # nV/rt-Hz
+        self.SIdRootFlicker = self.SVgRootFlicker * self.gm * 0.001  # pA/rt-Hz
+
+        # Find gate-referred flicker noise voltage density at 1Hz and find fcorner       
+        self.SVgRootFlicker1Hz = kfprimeroot * np.sqrt(1/(self.WL))    # nV/rt-Hz
+        self.fcorner = ((self.SVgRootFlicker1Hz/self.SVgRootThermal)**(2/self.af)) * 1e-6   #in MHz
+        
+        #----------------------_TODO: finish NOISE----------------------------------#
     
     """
     Function LoadProcessParams
